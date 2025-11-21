@@ -1,0 +1,67 @@
+# Android
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+*.iml
+.gradle/
+local.properties
+.idea/
+*.keystore
+*.jks
+captures/
+output.json
+*.hprof
+
+# Built application files
+androidAPP/app/build/
+androidAPP/shell-server/build/
+androidAPP/.gradle/
+androidAPP/build/
+
+# Gradle wrapper
+!gradle-wrapper.jar
+
+# Local configuration file
+!local.properties
+
+# Log Files
+*.log
+
+# Android Studio
+.DS_Store
+.externalNativeBuild
+.cxx
+
+# IntelliJ IDEA
+*.iws
+out/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Reference app and decompiled files (不提交参考应用)
+autobot_3.2.1.apk
+autobot_extracted/
+autobot_decompiled/
+参考应用*/
+
+# Test and diagnostic scripts
+test_*.ps1
+diagnose_*.ps1
+*.png
+*.jpg
+*.jpeg
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# IDE
+.vscode/
+.vs/
+

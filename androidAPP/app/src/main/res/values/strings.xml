@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AutoBot</string>
+    <string name="notification_channel_name">AutoBot 服务</string>
+    <string name="notification_channel_desc">保持 AutoBot 服务运行</string>
+    <string name="notification_title">AutoBot 正在运行</string>
+    <string name="notification_content">点击查看详情</string>
+</resources>
+

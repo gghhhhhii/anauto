@@ -1,0 +1,94 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.autobot.shell'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 26
+        targetSdk 34
+
+        consumerProguardFiles "consumer-rules.pro"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    // Kotlin for Android
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.20"
+
+    // NanoHTTPD
+    implementation 'org.nanohttpd:nanohttpd:2.3.1'
+
+    // Android (provided by system, use compileOnly)
+    compileOnly 'com.google.android:android:4.1.1.4'
+}
+
+// 生成包含所有依赖的 DEX JAR
+task assembleDexJar(dependsOn: 'assembleRelease') {
+    doLast {
+        def aarFile = file("${buildDir}/outputs/aar/shell-server-release.aar")
+        def outputDir = file("${buildDir}/outputs/dex-jar")
+        def outputJar = file("${outputDir}/shell-server.jar")
+        
+        outputDir.mkdirs()
+        
+        // 解压 AAR
+        def tempDir = file("${buildDir}/tmp/aar-extracted")
+        tempDir.mkdirs()
+        
+        copy {
+            from zipTree(aarFile)
+            into tempDir
+        }
+        
+        // 提取 classes.jar 和 libs
+        def classesJar = file("${tempDir}/classes.jar")
+        def libsDir = file("${tempDir}/libs")
+        
+        // 复制 classes.dex 到输出目录（如果存在）
+        def classesDex = file("${tempDir}/classes.dex")
+        if (classesDex.exists()) {
+            // 直接使用 AAR 中的 DEX
+            ant.zip(destfile: outputJar) {
+                fileset(dir: tempDir) {
+                    include(name: "classes.dex")
+                }
+                // 添加依赖库
+                if (libsDir.exists()) {
+                    zipgroupfileset(dir: libsDir, includes: "*.jar")
+                }
+            }
+        } else {
+            // 如果没有 DEX，需要转换
+            println "⚠ No DEX found in AAR, using classes.jar instead"
+            copy {
+                from classesJar
+                into outputDir
+                rename { 'shell-server.jar' }
+            }
+        }
+        
+        println "✓ DEX JAR created: ${outputJar.absolutePath}"
+        println "  Size: ${outputJar.length() / 1024} KB"
+    }
+}
+

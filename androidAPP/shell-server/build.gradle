@@ -1,0 +1,153 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.autobot.shell'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 26
+        targetSdk 34
+
+        consumerProguardFiles "consumer-rules.pro"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    // Kotlin for Android
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.20"
+
+    // NanoHTTPD
+    implementation 'org.nanohttpd:nanohttpd:2.3.1'
+}
+
+// 生成包含所有依赖的 Fat JAR，然后转换为 DEX
+task assembleFatJar(type: Jar, dependsOn: 'assembleRelease') {
+    archiveBaseName.set('shell-server-fat')
+    archiveVersion.set('')
+    destinationDirectory.set(file("${buildDir}/outputs/fat-jar"))
+    
+    // 解压 AAR 并提取 classes.jar
+    doFirst {
+        def aarFile = file("${buildDir}/outputs/aar/shell-server-release.aar")
+        def tempDir = file("${buildDir}/tmp/aar-extracted")
+        tempDir.deleteDir()
+        tempDir.mkdirs()
+        
+        copy {
+            from zipTree(aarFile)
+            into tempDir
+        }
+    }
+    
+    // 合并所有 JAR（我们的代码 + 所有依赖）
+    from {
+        def tempDir = file("${buildDir}/tmp/aar-extracted")
+        def classesJar = file("${tempDir}/classes.jar")
+        
+        // 收集所有需要合并的 JAR（使用 Android Library 的配置）
+        def jarsToMerge = []
+        
+        // 添加运行时依赖
+        configurations.releaseRuntimeClasspath.each { file ->
+            if (file.name.endsWith('.jar')) {
+                jarsToMerge.add(zipTree(file))
+            }
+        }
+        
+        // 添加我们自己的 classes.jar
+        jarsToMerge.add(zipTree(classesJar))
+        
+        jarsToMerge
+    }
+    
+    // 排除签名文件和重复的 META-INF 文件
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/MANIFEST.MF'
+    
+    // 处理重复文件
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    
+    doLast {
+        println "✓ Fat JAR created: ${archiveFile.get().asFile.absolutePath}"
+        println "  Size: ${archiveFile.get().asFile.length() / 1024} KB"
+    }
+}
+
+// 将 Fat JAR 转换为 DEX
+task assembleDexJar(dependsOn: 'assembleFatJar') {
+    doLast {
+        def fatJar = file("${buildDir}/outputs/fat-jar/shell-server-fat.jar")
+        def dexOutputDir = file("${buildDir}/outputs/dex")
+        def finalJar = file("${buildDir}/outputs/shell-server.jar")
+        
+        dexOutputDir.deleteDir()
+        dexOutputDir.mkdirs()
+        
+        // 查找 d8 工具
+        def androidSdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+        if (!androidSdkRoot) {
+            androidSdkRoot = System.getProperty("user.home") + "/AppData/Local/Android/Sdk"
+        }
+        
+        def buildToolsDir = file("${androidSdkRoot}/build-tools")
+        def d8Exe = null
+        
+        if (buildToolsDir.exists()) {
+            buildToolsDir.listFiles().sort().reverse().each { version ->
+                def d8Path = file("${version}/d8.bat")
+                if (d8Path.exists() && !d8Exe) {
+                    d8Exe = d8Path
+                }
+            }
+        }
+        
+        if (!d8Exe) {
+            throw new GradleException("❌ d8 tool not found in Android SDK")
+        }
+        
+        println "🔧 Converting Fat JAR to DEX using: ${d8Exe}"
+        
+        // 执行 d8 转换
+        exec {
+            commandLine d8Exe, '--output', dexOutputDir.absolutePath, fatJar.absolutePath
+            ignoreExitValue = false
+        }
+        
+        // 检查生成的 DEX 文件
+        def dexFile = file("${dexOutputDir}/classes.dex")
+        if (!dexFile.exists()) {
+            throw new GradleException("❌ DEX file not generated")
+        }
+        
+        println "✓ DEX generated: ${dexFile.absolutePath} (${dexFile.length() / 1024} KB)"
+        
+        // 将 DEX 打包成 JAR
+        ant.zip(destfile: finalJar) {
+            fileset(dir: dexOutputDir) {
+                include(name: "classes.dex")
+            }
+        }
+        
+        println "✓ Final DEX JAR created: ${finalJar.absolutePath}"
+        println "  Size: ${finalJar.length() / 1024} KB"
+    }
+}
+
