@@ -124,11 +124,19 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 
 ## 性能优化
 
-- ✅ UI 树遍历使用迭代算法替代递归，减少栈开销
-- ✅ 批量设置 JSON 属性，减少对象创建
-- ✅ 健康检查请求不打印日志，减少 I/O
+### UI 树获取性能
+- ✅ **根节点缓存机制**：通过 `AccessibilityEvent` 监听器实时缓存根节点
+  - 首次请求：0.5-2 秒（需要初始化 UiAutomation）
+  - **后续请求：0.1-0.5 秒**（使用缓存，极快！⚡）
+- ✅ 使用 `XmlSerializer` 替代字符串拼接，提升序列化性能
+- ✅ 立即释放子节点（`child.recycle()`），减少内存占用
+- ✅ 限制遍历深度（200 层），防止栈溢出
 - ✅ `isWait=0` 时跳过 `waitForIdle`，快速响应
-- ✅ Shell Server 使用 `setsid` 守护化，确保后台稳定运行
+
+### Shell Server 稳定性
+- ✅ 使用 `nohup` 命令后台运行，确保进程不会随 ADB 断开而终止
+- ✅ 支持停止和重启功能，无需重启应用
+- ✅ 自动健康检查和错误恢复
 
 ## 故障排查
 
