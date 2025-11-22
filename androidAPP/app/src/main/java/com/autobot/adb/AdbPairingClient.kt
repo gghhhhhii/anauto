@@ -147,18 +147,22 @@ class AdbPairingClient(
             val pairingCodeBytes = pairingCode.toByteArray(StandardCharsets.UTF_8)
             
             // 使用反射调用 Conscrypt.exportKeyingMaterial
+            // Hidden API Bypass 已在 Application 中初始化，可以绕过运行时限制
             val exportedKey = try {
                 val conscryptClass = Class.forName("com.android.org.conscrypt.Conscrypt")
                 val exportMethod = conscryptClass.getMethod(
-                    "exportKeyingMaterial",
+                            "exportKeyingMaterial",
                     javax.net.ssl.SSLSocket::class.java,
-                    String::class.java,
-                    ByteArray::class.java,
-                    Int::class.java
-                )
+                            String::class.java,
+                            ByteArray::class.java,
+                            Int::class.javaPrimitiveType
+                        )
                 exportMethod.invoke(null, sslSocket, ADB_LABEL, null, EXPORT_KEY_SIZE) as? ByteArray
+            } catch (e: NoSuchMethodException) {
+                Timber.e(e, "  ✗ 未找到 exportKeyingMaterial 方法")
+                null
             } catch (e: Exception) {
-                Timber.e(e, "  ✗ 反射调用 Conscrypt 失败")
+                Timber.e(e, "  ✗ 调用 Conscrypt.exportKeyingMaterial 失败: ${e.javaClass.simpleName}: ${e.message}")
                 null
             }
             

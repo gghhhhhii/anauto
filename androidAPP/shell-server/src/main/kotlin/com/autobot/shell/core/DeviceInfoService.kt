@@ -1,26 +1,27 @@
 package com.autobot.shell.core
 
-import android.content.Context
 import android.os.Build
-import android.provider.Settings
+import android.view.Display
 import java.net.NetworkInterface
-import java.util.*
 
 /**
- * 设备信息服务
- * 提供设备ID、IP地址、屏幕信息等
+ * 设备信息服务（无需Context，适用于Shell环境）
+ * 使用系统API、反射和命令行获取设备信息
  */
-class DeviceInfoService(private val context: Context) {
+class DeviceInfoService {
 
     /**
-     * 获取设备ID（Android ID）
+     * 获取设备ID（通过系统属性）
      */
     fun getDeviceId(): String {
         return try {
-            Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-                ?: UUID.randomUUID().toString()
+            // 尝试多种方式获取设备ID
+            getSystemProperty("ro.serialno") 
+                ?: getSystemProperty("ro.boot.serialno")
+                ?: Build.SERIAL
+                ?: Build.getSerial()
         } catch (e: Exception) {
-            UUID.randomUUID().toString()
+            "unknown"
         }
     }
 
@@ -49,62 +50,71 @@ class DeviceInfoService(private val context: Context) {
     }
 
     /**
-     * 获取屏幕信息
+     * 获取屏幕信息（通过WindowManager服务）
      */
     fun getScreenInfo(): Map<String, Any> {
-        val displayMetrics = context.resources.displayMetrics
-        val rotation = context.display?.rotation ?: 0
-        
-        return mapOf(
-            "rotation" to rotation,
-            "width" to displayMetrics.widthPixels,
-            "height" to displayMetrics.heightPixels
-        )
+        return try {
+            val displayInfo = getDisplayInfo()
+            mapOf(
+                "rotation" to (displayInfo["rotation"] ?: 0),
+                "width" to (displayInfo["width"] ?: 0),
+                "height" to (displayInfo["height"] ?: 0)
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            mapOf(
+                "rotation" to 0,
+                "width" to 1080,
+                "height" to 1920
+            )
+        }
     }
 
     /**
      * 获取屏幕方向
-     * 0: 竖直向上
-     * 1: 逆时针旋转90度
-     * 2: 旋转180度
-     * 3: 顺时针旋转90度
      */
     fun getScreenRotation(): Int {
-        return context.display?.rotation ?: 0
+        return try {
+            val displayInfo = getDisplayInfo()
+            displayInfo["rotation"] as? Int ?: 0
+        } catch (e: Exception) {
+            0
+        }
     }
 
     /**
      * 获取完整的系统信息
      */
     fun getSystemInfo(): Map<String, Any> {
-        val displayMetrics = context.resources.displayMetrics
-        val rotation = context.display?.rotation ?: 0
-        
-        // 显示信息
-        val displayInfo = mapOf(
-            "rotation" to rotation,
-            "width" to displayMetrics.widthPixels,
-            "height" to displayMetrics.heightPixels
-        )
+        val displayInfo = try {
+            getDisplayInfo()
+        } catch (e: Exception) {
+            mapOf("rotation" to 0, "width" to 1080, "height" to 1920)
+        }
 
         // 内存信息
         val runtime = Runtime.getRuntime()
         val totalMemory = runtime.totalMemory()
         val freeMemory = runtime.freeMemory()
+        val maxMemory = runtime.maxMemory()
         val memoryInfo = mapOf(
-            "total" to totalMemory,
+            "total" to maxMemory,
             "free" to freeMemory,
-            "totalStr" to formatSize(totalMemory),
+            "totalStr" to formatSize(maxMemory),
             "freeStr" to formatSize(freeMemory)
         )
 
-        // 存储信息（简化版本）
-        val diskInfo = mapOf(
-            "phoneTotalStr" to "N/A",
-            "phoneFreeStr" to "N/A",
-            "sdcardTotalStr" to "N/A",
-            "sdcardFreeStr" to "N/A"
-        )
+        // 存储信息（通过StatFs）
+        val diskInfo = try {
+            getDiskInfo()
+        } catch (e: Exception) {
+            mapOf(
+                "phoneTotalStr" to "N/A",
+                "phoneFreeStr" to "N/A",
+                "sdcardTotalStr" to "N/A",
+                "sdcardFreeStr" to "N/A"
+            )
+        }
 
         // 设备信息
         val devicesInfo = mapOf(
@@ -130,14 +140,103 @@ class DeviceInfoService(private val context: Context) {
             "abis" to Build.SUPPORTED_ABIS.toList(),
             "bootloader" to Build.BOOTLOADER,
             "hardware" to Build.HARDWARE,
-            "serial" to "unknown",
-            "sdkInt" to Build.VERSION.SDK_INT,
+            "serial" to getDeviceId(),
+            "sdkInt" to Build.VERSION.SDK_INT.toString(),
             "release" to Build.VERSION.RELEASE,
             "displayInfo" to displayInfo,
             "memoryInfo" to memoryInfo,
             "diskInfo" to diskInfo,
             "devicesInfo" to devicesInfo
         )
+    }
+
+    /**
+     * 通过WindowManager服务获取显示信息
+     */
+    private fun getDisplayInfo(): Map<String, Any> {
+        return try {
+            // 通过反射获取WindowManager服务
+            val serviceManager = Class.forName("android.os.ServiceManager")
+            val getService = serviceManager.getMethod("getService", String::class.java)
+            val binder = getService.invoke(null, "window")
+
+            val stub = Class.forName("android.view.IWindowManager\$Stub")
+            val asInterface = stub.getMethod("asInterface", Class.forName("android.os.IBinder"))
+            val wm = asInterface.invoke(null, binder)
+
+            // 获取Display信息
+            val getInitialDisplaySize = wm.javaClass.getMethod("getInitialDisplaySize", Int::class.javaPrimitiveType, Class.forName("android.graphics.Point"))
+            val point = Class.forName("android.graphics.Point").newInstance()
+            getInitialDisplaySize.invoke(wm, 0, point)
+
+            val x = point.javaClass.getField("x").get(point) as Int
+            val y = point.javaClass.getField("y").get(point) as Int
+
+            // 获取旋转
+            val getRotation = wm.javaClass.getMethod("getDefaultDisplayRotation")
+            val rotation = getRotation.invoke(wm) as Int
+
+            mapOf(
+                "rotation" to rotation,
+                "width" to x,
+                "height" to y
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            // 默认值
+            mapOf(
+                "rotation" to 0,
+                "width" to 1080,
+                "height" to 1920
+            )
+        }
+    }
+
+    /**
+     * 获取磁盘信息
+     */
+    private fun getDiskInfo(): Map<String, Any> {
+        return try {
+            val statFs = android.os.StatFs("/sdcard")
+            val blockSize = statFs.blockSizeLong
+            val totalBlocks = statFs.blockCountLong
+            val availableBlocks = statFs.availableBlocksLong
+
+            val totalSize = totalBlocks * blockSize
+            val freeSize = availableBlocks * blockSize
+
+            mapOf(
+                "sdcardTotal" to totalSize,
+                "sdcardFree" to freeSize,
+                "sdcardTotalStr" to formatSize(totalSize),
+                "sdcardFreeStr" to formatSize(freeSize),
+                "phoneTotal" to totalSize,
+                "phoneFree" to freeSize,
+                "phoneTotalStr" to formatSize(totalSize),
+                "phoneFreeStr" to formatSize(freeSize)
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            mapOf(
+                "sdcardTotalStr" to "N/A",
+                "sdcardFreeStr" to "N/A",
+                "phoneTotalStr" to "N/A",
+                "phoneFreeStr" to "N/A"
+            )
+        }
+    }
+
+    /**
+     * 获取系统属性
+     */
+    private fun getSystemProperty(key: String): String? {
+        return try {
+            val clazz = Class.forName("android.os.SystemProperties")
+            val method = clazz.getMethod("get", String::class.java, String::class.java)
+            method.invoke(null, key, "") as? String
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**
@@ -156,4 +255,3 @@ class DeviceInfoService(private val context: Context) {
         return String.format("%.1f%s", value, units[unitIndex])
     }
 }
-

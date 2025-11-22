@@ -200,6 +200,28 @@ class InputService(private val uiAutomationService: UiAutomationService) {
     }
 
     /**
+     * 多指手势（简化实现：顺序执行多个单指手势）
+     * @param duration 手势持续时间（毫秒）
+     * @param gestures 多个手指的手势路径点列表
+     */
+    fun multiGesture(duration: Long, gestures: List<List<Point>>): Boolean {
+        if (gestures.isEmpty()) return false
+        
+        return try {
+            // 简化实现：顺序执行每个手指的手势
+            // 注意：真正的多指手势需要同时执行，这里为了简化先顺序执行
+            for (gesture in gestures) {
+                gesture(duration, gesture)
+                Thread.sleep(50) // 每个手势之间间隔50ms
+            }
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    /**
      * 手势路径点
      */
     data class Point(val x: Float, val y: Float)

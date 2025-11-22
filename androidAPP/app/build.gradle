@@ -28,6 +28,11 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+    
+    // 允许访问隐藏 API（用于 Conscrypt）
+    lintOptions {
+        disable 'NewApi'
+    }
 
     kotlinOptions {
         jvmTarget = '17'
@@ -42,6 +47,34 @@ android {
         resources {
             excludes += ['META-INF/INDEX.LIST', 'META-INF/DEPENDENCIES']
         }
+    }
+    
+    // 确保在构建时生成 DEX JAR 并复制到 assets
+    applicationVariants.all { variant ->
+        def variantName = variant.name.capitalize()
+        def generateDexJarTask = tasks.register("generateDexJarFor${variantName}") {
+            dependsOn project(':shell-server').tasks.named('assembleDexJar')
+            doLast {
+                def dexJar = file("${project(':shell-server').buildDir}/outputs/shell-server.jar")
+                def assetsDir = file("${projectDir}/src/main/assets/shell-server")
+                assetsDir.mkdirs()
+                def targetJar = file("${assetsDir}/shell-server.jar")
+                
+                if (dexJar.exists()) {
+                    copy {
+                        from dexJar
+                        into assetsDir
+                        rename { "shell-server.jar" }
+                    }
+                    println "✓ DEX JAR copied to assets: ${targetJar.absolutePath}"
+                    println "  Size: ${targetJar.length() / 1024} KB"
+                } else {
+                    throw new GradleException("❌ DEX JAR not found: ${dexJar.absolutePath}")
+                }
+            }
+        }
+        
+        variant.preBuildProvider.configure { it.dependsOn(generateDexJarTask) }
     }
 }
 
@@ -77,5 +110,8 @@ dependencies {
     // BouncyCastle for X.509 certificate generation (for ADB TLS)
     implementation 'org.bouncycastle:bcprov-jdk15to18:1.70'
     implementation 'org.bouncycastle:bcpkix-jdk15to18:1.70'
+    
+    // LSPosed Hidden API Bypass - 绕过 Android 隐藏 API 限制
+    implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'
 }
 

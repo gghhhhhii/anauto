@@ -21,13 +21,14 @@ class ShellServerManager(private val context: Context) {
         private const val TAG = "ShellServerManager"
         private const val SHELL_SERVER_JAR = "shell-server.jar"
         private const val SHELL_SERVER_PORT = 19090
-        private const val MAX_RETRY = 3
-        private const val RETRY_DELAY = 2000L
+        private const val MAX_RETRY = 5  // 增加重试次数，但使用递增延迟（优化启动速度）
+        private const val INITIAL_RETRY_DELAY = 300L  // 初始延迟很短（300ms）
+        private const val MAX_RETRY_DELAY = 1000L  // 最大延迟（1秒）
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
+        .connectTimeout(3, TimeUnit.SECONDS)  // 减少连接超时（优化响应速度）
+        .readTimeout(5, TimeUnit.SECONDS)  // 减少读取超时（优化响应速度）
         .build()
 
     /**
@@ -55,10 +56,8 @@ class ShellServerManager(private val context: Context) {
             }
             Timber.i("✓ Shell Server 启动命令已执行")
 
-            // 步骤 3: 等待并检查健康状态
-            Timber.i("等待 Shell Server 初始化...")
-            delay(3000) // 等待 3 秒让 Shell Server 完全启动
-
+            // 步骤 3: 立即开始健康检查（使用快速重试策略）
+            Timber.i("开始健康检查（快速重试策略）...")
             val isHealthy = checkHealth()
             if (isHealthy) {
                 Timber.i("========================================")
@@ -69,7 +68,9 @@ class ShellServerManager(private val context: Context) {
             } else {
                 Timber.w("⚠️ Shell Server 健康检查未通过")
                 Timber.w("进程可能已启动但端口未就绪，或启动失败")
-                Timber.w("请通过 ADB 查看日志: adb shell cat /sdcard/shell-server.log")
+                // 自动诊断问题
+                readShellServerLog()
+                checkShellServerProcess()
             }
 
             return@withContext isHealthy
@@ -126,7 +127,7 @@ class ShellServerManager(private val context: Context) {
                 Timber.i("ADB 未连接，尝试自动建立连接...")
                 try {
                     adbManager.connect(context)
-                    delay(2000) // 等待连接建立
+                    delay(1000) // 减少等待时间（优化启动速度）
                     
                     if (!adbManager.isConnected()) {
                         Timber.e("✗ ADB 自动连接失败")
@@ -142,57 +143,71 @@ class ShellServerManager(private val context: Context) {
             
             Timber.i("ADB 已连接，准备启动 Shell Server")
             
-            // 先尝试停止已有的 Shell Server
-            stopShellServerViaAdb(adbManager)
+            // 参考应用方式：简单停止旧服务器，不等待端口释放
+            // 依赖 SO_REUSEADDR 允许立即绑定（即使端口处于 TIME_WAIT 状态）
+            adbManager.executeShellCommand("pkill -9 -f 'com.autobot.shell.ShellServerKt' 2>/dev/null")
+            // 短暂延迟，让进程有时间终止（但不等待端口释放）
+            delay(200)
             
-            // 等待进程完全终止
-            Timber.d("等待 Shell Server 进程完全终止...")
-            delay(1000)
-
-            // 日志文件路径（外部存储，方便查看）
-            val logPath = "/sdcard/shell-server.log"
-            val scriptPath = "/sdcard/start-shell-server.sh"
+            // 将JAR文件推送到/data/local/tmp/（参考应用的方式）
+            val remoteJarPath = "/data/local/tmp/shell-server.jar"
+            val localJarPath = jarFile.absolutePath
+            val localFileSize = jarFile.length()
             
-            // 清除旧日志
-            adbManager.executeShellCommand("rm -f $logPath")
-            Timber.d("已清除旧日志文件")
+            // 检查远程文件是否存在且大小是否匹配（优化：避免不必要的复制）
+            val remoteFileInfo = adbManager.executeShellCommand("ls -l $remoteJarPath 2>/dev/null | awk '{print \$5}'")
+            val remoteFileSize = remoteFileInfo?.trim()?.toLongOrNull()
             
-            // 方案：创建启动脚本，避免复杂的引号转义问题
-            val scriptContent = """
-                #!/system/bin/sh
-                nohup app_process -Djava.class.path=${jarFile.absolutePath} ${jarFile.parent} com.autobot.shell.ShellServerKt $SHELL_SERVER_PORT >/sdcard/shell-server.log 2>&1 &
-            """.trimIndent()
-            
-            // 写入启动脚本
-            Timber.d("创建启动脚本: $scriptPath")
-            adbManager.executeShellCommand("echo '$scriptContent' > $scriptPath")
-            adbManager.executeShellCommand("chmod 755 $scriptPath")
-            Timber.d("✓ 启动脚本已创建并赋权")
-            
-            // 执行启动脚本
-            val command = "sh $scriptPath"
-            Timber.i("执行启动脚本: $command")
-            Timber.i("💡 日志文件: $logPath")
-            
-            // 通过 ADB 执行命令
-            val result = adbManager.executeShellCommand(command)
-            
-            if (result != null) {
-                Timber.i("Shell Server 启动命令已通过 ADB 执行")
-                Timber.d("命令输出: $result")
-                
-                // 启动命令执行成功（后台运行），不依赖 ps 检查
-                // 将在后续的健康检查中验证是否真正启动
-                return true
+            if (remoteFileSize != null && remoteFileSize == localFileSize) {
+                Timber.i("✓ JAR文件已存在且大小匹配，跳过复制（本地: ${localFileSize} bytes, 远程: ${remoteFileSize} bytes）")
+                // 确保权限正确（可能被其他操作修改）
+                adbManager.executeShellCommand("chmod 700 $remoteJarPath")
+                adbManager.executeShellCommand("chown 2000 $remoteJarPath")
+                adbManager.executeShellCommand("chgrp 2000 $remoteJarPath")
             } else {
-                Timber.e("通过 ADB 执行启动命令失败")
-                // 查看日志
-                val logResult = adbManager.executeShellCommand("cat $logPath")
-                if (logResult != null) {
-                    Timber.e("Shell Server 日志:\n$logResult")
+                // 文件不存在或大小不匹配，需要复制
+                if (remoteFileSize != null) {
+                    Timber.i("JAR文件大小不匹配，需要更新（本地: ${localFileSize} bytes, 远程: ${remoteFileSize} bytes）")
+                } else {
+                    Timber.i("JAR文件不存在，需要复制（本地: ${localFileSize} bytes）")
                 }
-                return false
+                
+                // 先删除旧的JAR文件
+                adbManager.executeShellCommand("rm -f $remoteJarPath")
+                
+                // 使用cp命令复制文件（应用缓存目录应该可以通过shell访问）
+                val copyResult = adbManager.executeShellCommand("cp '$localJarPath' '$remoteJarPath'")
+                if (copyResult == null) {
+                    Timber.e("✗ cp命令失败，无法复制JAR文件")
+                    return false
+                }
+                
+                // 按照参考应用的方式设置文件权限和所有者
+                // chmod 700 = rwx------ (只有所有者可读写执行)
+                // chown 2000 = shell 用户
+                // chgrp 2000 = shell 组
+                adbManager.executeShellCommand("chmod 700 $remoteJarPath")
+                adbManager.executeShellCommand("chown 2000 $remoteJarPath")
+                adbManager.executeShellCommand("chgrp 2000 $remoteJarPath")
+                Timber.i("✓ JAR文件已复制到设备: $remoteJarPath")
             }
+            
+            // 参考应用的启动方式：直接执行命令，不检查端口和进程
+            val workingDir = "/data/local/tmp"
+            val startCommand = "nohup app_process -Djava.class.path=$remoteJarPath $workingDir com.autobot.shell.ShellServerKt > /dev/null 2>&1 &"
+            Timber.i("执行启动命令...")
+            Timber.d("命令: $startCommand")
+
+            val result = adbManager.executeShellCommand(startCommand)
+            Timber.d("启动命令执行结果: ${result?.take(100)}")
+            
+            // 参考应用的方式：等待1秒
+            Timber.d("等待 Shell Server 启动...")
+            delay(1000)
+            
+            Timber.i("✓ Shell Server 启动命令已执行（参考应用方式：只检查命令执行，不验证进程和端口）")
+            
+            return true
         } catch (e: Exception) {
             Timber.e(e, "启动 Shell Server 失败")
             false
@@ -201,11 +216,13 @@ class ShellServerManager(private val context: Context) {
     
     /**
      * 通过 ADB 停止 Shell Server
+     * 参考应用方式：简单停止，不等待端口释放，依赖 SO_REUSEADDR 允许立即重启
      */
-    private fun stopShellServerViaAdb(adbManager: com.autobot.adb.AdbConnectionManager) {
+    private suspend fun stopShellServerViaAdb(adbManager: com.autobot.adb.AdbConnectionManager) = withContext(Dispatchers.IO) {
         try {
-            val result = adbManager.executeShellCommand("pkill -f $SHELL_SERVER_JAR")
-            Timber.d("停止 Shell Server: $result")
+            // 参考应用方式：只发送停止命令，不等待结果
+            adbManager.executeShellCommand("pkill -9 -f 'com.autobot.shell.ShellServerKt' 2>/dev/null")
+            Timber.d("✓ Shell Server 停止命令已执行（SO_REUSEADDR 允许立即重启）")
         } catch (e: Exception) {
             Timber.w(e, "停止 Shell Server 失败（可能没有运行）")
         }
@@ -231,7 +248,14 @@ class ShellServerManager(private val context: Context) {
                 }
             } else {
                 stopShellServerViaAdb(adbManager)
-                Timber.i("✓ Shell Server 已停止")
+                // 等待进程完全终止
+                delay(1000)  // 减少等待时间（优化停止速度）
+                
+                // 断开 ADB 连接（参考应用的行为）
+                Timber.i("断开 ADB 连接...")
+                adbManager.disconnect()
+                
+                Timber.i("✓ Shell Server 已停止，ADB 连接已断开")
                 true
             }
         } catch (e: Exception) {
@@ -242,9 +266,14 @@ class ShellServerManager(private val context: Context) {
 
     /**
      * 检查 Shell Server 健康状态
+     * 参考应用方式：快速重试，因为启动命令已经等待了 1 秒
      */
     suspend fun checkHealth(): Boolean = withContext(Dispatchers.IO) {
         var retryCount = 0
+        // 参考应用方式：启动命令已等待 1 秒，健康检查立即开始
+        // 使用渐进式重试策略
+        val delays = listOf(0L, 300L, 500L, 700L, 1000L)
+        
         while (retryCount < MAX_RETRY) {
             try {
                 val request = Request.Builder()
@@ -258,21 +287,115 @@ class ShellServerManager(private val context: Context) {
                 Timber.d("健康检查响应: HTTP ${response.code}, Body: $responseBody")
 
                 if (response.isSuccessful && responseBody.isNotEmpty()) {
-                    Timber.i("✓ Shell Server 健康检查通过")
+                    Timber.i("✓ Shell Server 健康检查通过 (尝试 ${retryCount + 1})")
                     return@withContext true
                 }
             } catch (e: Exception) {
-                Timber.w("Shell Server 健康检查失败 (尝试 ${retryCount + 1}/$MAX_RETRY): ${e.message}")
+                if (retryCount < MAX_RETRY - 1) {
+                    // 只在非最后一次尝试时输出debug日志
+                    Timber.d("健康检查失败 (尝试 ${retryCount + 1}/$MAX_RETRY): ${e.message}")
+                } else {
+                    Timber.w("健康检查失败 (尝试 ${retryCount + 1}/$MAX_RETRY): ${e.message}")
+                }
             }
 
             retryCount++
             if (retryCount < MAX_RETRY) {
-                delay(RETRY_DELAY)
+                // 使用预定义的延迟序列
+                val delayTime = if (retryCount - 1 < delays.size) {
+                    delays[retryCount - 1]
+                } else {
+                    MAX_RETRY_DELAY
+                }
+                delay(delayTime)
             }
         }
 
         Timber.e("✗ Shell Server 健康检查失败，已达最大重试次数")
+        
         return@withContext false
+    }
+    
+    /**
+     * 读取 Shell Server 日志文件
+     */
+    private suspend fun readShellServerLog() = withContext(Dispatchers.IO) {
+        try {
+            val adbManager = com.autobot.adb.AdbConnectionManager.getInstance()
+            if (adbManager.isConnected()) {
+                val logPath = "/sdcard/shell-server.log"
+                Timber.i("正在读取 Shell Server 日志: $logPath")
+                val logContent = adbManager.executeShellCommand("cat $logPath 2>/dev/null")
+                if (logContent != null && logContent.isNotEmpty()) {
+                    Timber.e("========================================")
+                    Timber.e("Shell Server 日志内容:")
+                    Timber.e("========================================")
+                    // 按行输出日志，方便阅读
+                    logContent.lines().forEach { line ->
+                        Timber.e("  $line")
+                    }
+                    Timber.e("========================================")
+                } else {
+                    Timber.w("日志文件为空或不存在（输出已重定向到 /dev/null）")
+                }
+            } else {
+                Timber.w("ADB 未连接，无法读取日志")
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "读取 Shell Server 日志失败")
+        }
+    }
+    
+    /**
+     * 检查 Shell Server 进程状态
+     */
+    private suspend fun checkShellServerProcess() = withContext(Dispatchers.IO) {
+        try {
+            val adbManager = com.autobot.adb.AdbConnectionManager.getInstance()
+            if (adbManager.isConnected()) {
+                Timber.i("正在检查 Shell Server 进程状态...")
+                
+                // 检查进程（可能失败，因为 app_process 在 ps 中可能不显示完整参数）
+                val psResult = adbManager.executeShellCommand("ps -A | grep -E 'app_process.*shell-server|com.autobot.shell.ShellServerKt' | grep -v grep")
+                if (psResult != null && psResult.isNotEmpty()) {
+                    Timber.i("✓ 发现 Shell Server 进程:")
+                    psResult.lines().forEach { line ->
+                        Timber.i("  $line")
+                    }
+                } else {
+                    Timber.w("✗ 未发现 Shell Server 进程（可能进程名称被截断，这是正常的）")
+                }
+                
+                // 检查端口（更可靠的方法：检查 LISTEN 状态）
+                val listenCheck = adbManager.executeShellCommand("netstat -tuln | grep :$SHELL_SERVER_PORT | grep LISTEN")
+                if (listenCheck != null && listenCheck.isNotEmpty()) {
+                    Timber.i("✓ 端口 $SHELL_SERVER_PORT 处于 LISTEN 状态:")
+                    Timber.i("  $listenCheck")
+                } else {
+                    // 也检查其他状态的连接（CLOSING 等）
+                    val allConnections = adbManager.executeShellCommand("netstat -tuln | grep :$SHELL_SERVER_PORT")
+                    if (allConnections != null && allConnections.isNotEmpty()) {
+                        Timber.w("⚠ 端口 $SHELL_SERVER_PORT 有连接但非 LISTEN 状态:")
+                        Timber.w("  $allConnections")
+                    } else {
+                        Timber.w("✗ 端口 $SHELL_SERVER_PORT 未被占用，服务器可能未启动")
+                    }
+                }
+                
+                // 检查 JAR 文件
+                val jarCheck = adbManager.executeShellCommand("ls -l /data/local/tmp/shell-server.jar 2>/dev/null")
+                if (jarCheck != null && jarCheck.isNotEmpty()) {
+                    Timber.i("✓ JAR 文件存在:")
+                    Timber.i("  $jarCheck")
+                } else {
+                    Timber.e("✗ JAR 文件不存在或无法访问")
+                }
+            } else {
+                Timber.w("ADB 未连接，无法检查进程状态")
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "检查 Shell Server 进程状态失败")
+        }
     }
 
     /**

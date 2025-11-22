@@ -336,12 +336,18 @@ class UiAutomationService private constructor() {
     private fun serializeNode(node: Any?, serializer: org.xmlpull.v1.XmlSerializer, visibleOnly: Boolean, depth: Int) {
         if (node == null || depth > 200) return
         
-        // 检查可见性
-        val isVisible = isVisibleToUserMethod?.invoke(node) as? Boolean ?: false
+        // 检查可见性（在打开tag之前检查，避免XML结构不匹配）
+        val isVisible = try {
+            isVisibleToUserMethod?.invoke(node) as? Boolean ?: false
+        } catch (e: Exception) {
+            false
+        }
         if (visibleOnly && !isVisible) return
         
+        var tagOpened = false
         try {
             serializer.startTag("", "node")
+            tagOpened = true
             
             // 序列化属性
             serializer.attribute("", "index", depth.toString())
@@ -362,27 +368,54 @@ class UiAutomationService private constructor() {
             serializer.attribute("", "selected", (isSelectedMethod?.invoke(node) as? Boolean ?: false).toString())
             
             // Bounds
-            val bounds = getBoundsInScreenMethod?.invoke(node)
-            if (bounds != null) {
-                val rect = bounds as android.graphics.Rect
-                serializer.attribute("", "bounds", "[${rect.left},${rect.top}][${rect.right},${rect.bottom}]")
-            } else {
+            try {
+                val bounds = getBoundsInScreenMethod?.invoke(node)
+                if (bounds != null) {
+                    val rect = bounds as android.graphics.Rect
+                    serializer.attribute("", "bounds", "[${rect.left},${rect.top}][${rect.right},${rect.bottom}]")
+                } else {
+                    serializer.attribute("", "bounds", "[0,0][0,0]")
+                }
+            } catch (e: Exception) {
                 serializer.attribute("", "bounds", "[0,0][0,0]")
             }
             
             // 递归处理子节点
-            val childCount = getChildCountMethod?.invoke(node) as? Int ?: 0
-            for (i in 0 until childCount) {
-                val child = getChildMethod?.invoke(node, i)
-                if (child != null) {
-                    serializeNode(child, serializer, visibleOnly, depth + 1)
-                    // ⚡ 立即释放子节点（关键优化！）
-                    recycleMethod?.invoke(child)
+            try {
+                val childCount = getChildCountMethod?.invoke(node) as? Int ?: 0
+                for (i in 0 until childCount) {
+                    try {
+                        val child = getChildMethod?.invoke(node, i)
+                        if (child != null) {
+                            serializeNode(child, serializer, visibleOnly, depth + 1)
+                            // ⚡ 立即释放子节点（关键优化！）
+                            try {
+                                recycleMethod?.invoke(child)
+                            } catch (e: Exception) {
+                                // 忽略回收错误
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // 忽略单个子节点的错误，继续处理其他子节点
+                        println("⚠ 处理子节点 $i 时出错: ${e.message}")
+                    }
                 }
+            } catch (e: Exception) {
+                println("⚠ 获取子节点时出错: ${e.message}")
             }
             
             serializer.endTag("", "node")
+            tagOpened = false
         } catch (e: Exception) {
+            // 如果tag已打开，尝试关闭它
+            if (tagOpened) {
+                try {
+                    serializer.endTag("", "node")
+                } catch (e2: Exception) {
+                    // 忽略关闭错误
+                }
+            }
+            println("✗ 序列化节点失败: ${e.message}")
             e.printStackTrace()
         }
     }
@@ -411,10 +444,17 @@ class UiAutomationService private constructor() {
             }
 
             // 递归生成 JSON（立即释放子节点）
+            // 注意：对于根节点（depth=0），我们总是包含它（不检查可见性），只对子节点应用visibleOnly过滤
             val json = nodeToJson(rootNode, visibleOnly, 0)
 
             // ⚠️ 不回收根节点（如果是缓存的，不能回收）
             // 参考应用也不回收根节点
+
+            // 确保返回的JSON不为空
+            if (json.length() == 0) {
+                println("⚠ 生成的JSON为空，返回默认结构")
+                return "{}"
+            }
 
             json.toString()
         } catch (e: Exception) {
@@ -431,56 +471,87 @@ class UiAutomationService private constructor() {
         val json = JSONObject()
         if (node == null || depth > 200) return json
         
-        // 检查可见性
-        val isVisible = isVisibleToUserMethod?.invoke(node) as? Boolean ?: false
-        if (visibleOnly && !isVisible) return json
+        // 检查可见性（在填充属性之前检查，避免不必要的处理）
+        // 注意：根节点（depth=0）总是包含，不检查可见性
+        val isVisible = try {
+            isVisibleToUserMethod?.invoke(node) as? Boolean ?: false
+        } catch (e: Exception) {
+            false
+        }
+        // 根节点（depth=0）总是包含，只对子节点应用visibleOnly过滤
+        if (visibleOnly && depth > 0 && !isVisible) return json
         
         try {
             // 基本属性
-            json.put("text", getTextMethod?.invoke(node)?.toString() ?: "")
-            json.put("resourceId", getResourceIdMethod?.invoke(node)?.toString() ?: "")
-            json.put("className", getClassNameMethod?.invoke(node)?.toString() ?: "")
-            json.put("packageName", getPackageNameMethod?.invoke(node)?.toString() ?: "")
-            json.put("contentDesc", getContentDescriptionMethod?.invoke(node)?.toString() ?: "")
-            json.put("checkable", isCheckableMethod?.invoke(node) as? Boolean ?: false)
-            json.put("checked", isCheckedMethod?.invoke(node) as? Boolean ?: false)
-            json.put("clickable", isClickableMethod?.invoke(node) as? Boolean ?: false)
-            json.put("enabled", isEnabledMethod?.invoke(node) as? Boolean ?: false)
-            json.put("focusable", isFocusableMethod?.invoke(node) as? Boolean ?: false)
-            json.put("focused", isFocusedMethod?.invoke(node) as? Boolean ?: false)
-            json.put("scrollable", isScrollableMethod?.invoke(node) as? Boolean ?: false)
-            json.put("longClickable", isLongClickableMethod?.invoke(node) as? Boolean ?: false)
-            json.put("password", isPasswordMethod?.invoke(node) as? Boolean ?: false)
-            json.put("selected", isSelectedMethod?.invoke(node) as? Boolean ?: false)
+            json.put("text", try { getTextMethod?.invoke(node)?.toString() ?: "" } catch (e: Exception) { "" })
+            json.put("resourceId", try { getResourceIdMethod?.invoke(node)?.toString() ?: "" } catch (e: Exception) { "" })
+            json.put("className", try { getClassNameMethod?.invoke(node)?.toString() ?: "" } catch (e: Exception) { "" })
+            json.put("packageName", try { getPackageNameMethod?.invoke(node)?.toString() ?: "" } catch (e: Exception) { "" })
+            json.put("contentDesc", try { getContentDescriptionMethod?.invoke(node)?.toString() ?: "" } catch (e: Exception) { "" })
+            json.put("checkable", try { isCheckableMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
+            json.put("checked", try { isCheckedMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
+            json.put("clickable", try { isClickableMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
+            json.put("enabled", try { isEnabledMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
+            json.put("focusable", try { isFocusableMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
+            json.put("focused", try { isFocusedMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
+            json.put("scrollable", try { isScrollableMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
+            json.put("longClickable", try { isLongClickableMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
+            json.put("password", try { isPasswordMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
+            json.put("selected", try { isSelectedMethod?.invoke(node) as? Boolean ?: false } catch (e: Exception) { false })
             json.put("visible", isVisible)
             
             // Bounds
-            val bounds = getBoundsInScreenMethod?.invoke(node)
-            if (bounds != null) {
-                val rect = bounds as android.graphics.Rect
-                val boundsJson = JSONObject()
-                boundsJson.put("left", rect.left)
-                boundsJson.put("top", rect.top)
-                boundsJson.put("right", rect.right)
-                boundsJson.put("bottom", rect.bottom)
-                json.put("bounds", boundsJson)
+            try {
+                val bounds = getBoundsInScreenMethod?.invoke(node)
+                if (bounds != null) {
+                    val rect = bounds as android.graphics.Rect
+                    val boundsJson = JSONObject()
+                    boundsJson.put("left", rect.left)
+                    boundsJson.put("top", rect.top)
+                    boundsJson.put("right", rect.right)
+                    boundsJson.put("bottom", rect.bottom)
+                    json.put("bounds", boundsJson)
+                }
+            } catch (e: Exception) {
+                // 忽略bounds错误
             }
             
             // 处理子节点
-            val childCount = getChildCountMethod?.invoke(node) as? Int ?: 0
-            if (childCount > 0) {
-                val children = JSONArray()
-                for (i in 0 until childCount) {
-                    val child = getChildMethod?.invoke(node, i)
-                    if (child != null) {
-                        children.put(nodeToJson(child, visibleOnly, depth + 1))
-                        // ⚡ 立即释放子节点（关键优化！）
-                        recycleMethod?.invoke(child)
+            try {
+                val childCount = getChildCountMethod?.invoke(node) as? Int ?: 0
+                if (childCount > 0) {
+                    val children = JSONArray()
+                    for (i in 0 until childCount) {
+                        try {
+                            val child = getChildMethod?.invoke(node, i)
+                            if (child != null) {
+                                val childJson = nodeToJson(child, visibleOnly, depth + 1)
+                                // 只有当子节点JSON不为空时才添加（避免添加不可见节点的空JSON）
+                                if (childJson.length() > 0) {
+                                    children.put(childJson)
+                                }
+                                // ⚡ 立即释放子节点（关键优化！）
+                                try {
+                                    recycleMethod?.invoke(child)
+                                } catch (e: Exception) {
+                                    // 忽略回收错误
+                                }
+                            }
+                        } catch (e: Exception) {
+                            // 忽略单个子节点的错误，继续处理其他子节点
+                            println("⚠ 处理子节点 $i 时出错: ${e.message}")
+                        }
+                    }
+                    // 只有当有子节点时才添加children数组
+                    if (children.length() > 0) {
+                        json.put("children", children)
                     }
                 }
-                json.put("children", children)
+            } catch (e: Exception) {
+                println("⚠ 获取子节点时出错: ${e.message}")
             }
         } catch (e: Exception) {
+            println("✗ 序列化节点为JSON失败: ${e.message}")
             e.printStackTrace()
         }
         
@@ -882,6 +953,68 @@ class UiAutomationService private constructor() {
     }
 
     /**
+     * 截图功能（返回字节数组）
+     * @return JPEG 格式的字节数组，如果失败返回 null
+     */
+    fun takeScreenshotBytes(): ByteArray? {
+        if (!initialized || uiAutomation == null) {
+            println("✗ UiAutomation 未初始化，无法截图")
+            return null
+        }
+
+        return try {
+            println("开始截图...")
+            
+            // 调用 UiAutomation.takeScreenshot()
+            val uiAutomationClass = Class.forName("android.app.UiAutomation")
+            val takeScreenshotMethod = uiAutomationClass.getMethod("takeScreenshot")
+            val bitmap = takeScreenshotMethod.invoke(uiAutomation)
+            
+            if (bitmap == null) {
+                println("✗ takeScreenshot() 返回 null")
+                return null
+            }
+            
+            println("✓ 截图成功，开始压缩为 JPEG...")
+            
+            // 将 Bitmap 压缩为 JPEG 并返回字节数组
+            val bitmapClass = Class.forName("android.graphics.Bitmap")
+            val compressFormatClass = Class.forName("android.graphics.Bitmap\$CompressFormat")
+            val compressMethod = bitmapClass.getMethod(
+                "compress",
+                compressFormatClass,
+                Int::class.javaPrimitiveType,
+                Class.forName("java.io.OutputStream")
+            )
+            
+            // 获取 JPEG 格式枚举值
+            val jpegFormat = compressFormatClass.getField("JPEG").get(null)
+            
+            // 创建 ByteArrayOutputStream
+            val baosClass = Class.forName("java.io.ByteArrayOutputStream")
+            val baos = baosClass.getConstructor().newInstance()
+            
+            // 压缩 Bitmap（质量85%）
+            compressMethod.invoke(bitmap, jpegFormat, 85, baos)
+            
+            // 获取字节数组
+            val toByteArrayMethod = baosClass.getMethod("toByteArray")
+            val bytes = toByteArrayMethod.invoke(baos) as ByteArray
+            
+            // 回收 Bitmap
+            val recycleMethod = bitmapClass.getMethod("recycle")
+            recycleMethod.invoke(bitmap)
+            
+            println("✓ JPEG 压缩完成，大小: ${bytes.size} bytes")
+            bytes
+        } catch (e: Exception) {
+            println("✗ 截图失败: ${e.message}")
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
      * 执行点击操作
      * @param x X 坐标
      * @param y Y 坐标
@@ -923,22 +1056,18 @@ class UiAutomationService private constructor() {
                 Boolean::class.javaPrimitiveType
             )
             
-            val downSuccess = injectEventMethod.invoke(uiAutomation, downEvent, true) as Boolean
+            // 异步模式：直接注入事件，不依赖返回值
+            injectEventMethod.invoke(uiAutomation, downEvent, false)
             Thread.sleep(10)
-            val upSuccess = injectEventMethod.invoke(uiAutomation, upEvent, true) as Boolean
+            injectEventMethod.invoke(uiAutomation, upEvent, false)
             
             // 回收事件
             val recycleMethod = motionEventClass.getMethod("recycle")
             recycleMethod.invoke(downEvent)
             recycleMethod.invoke(upEvent)
             
-            val success = downSuccess && upSuccess
-            if (success) {
-                println("✓ 点击成功")
-            } else {
-                println("✗ 点击失败")
-            }
-            success
+            println("✓ 点击已注入")
+            true
         } catch (e: Exception) {
             println("✗ 点击失败: ${e.message}")
             e.printStackTrace()
@@ -964,8 +1093,13 @@ class UiAutomationService private constructor() {
         return try {
             println("执行滑动: ($x1, $y1) -> ($x2, $y2), duration=${duration}ms")
             
-            val now = System.currentTimeMillis()
-            val steps = (duration / 10).toInt().coerceAtLeast(2)
+            // 使用SystemClock.uptimeMillis()作为downTime（参考应用的做法）
+            val systemClockClass = Class.forName("android.os.SystemClock")
+            val uptimeMillisMethod = systemClockClass.getMethod("uptimeMillis")
+            val downTime = uptimeMillisMethod.invoke(null) as Long
+            
+            // 计算步数（参考应用：duration/10，但至少2步）
+            val steps = if (duration == 0L) 1 else (duration / 10).toInt().coerceAtLeast(2)
             
             val motionEventClass = Class.forName("android.view.MotionEvent")
             val obtainMethod = motionEventClass.getMethod(
@@ -987,34 +1121,50 @@ class UiAutomationService private constructor() {
             
             val recycleMethod = motionEventClass.getMethod("recycle")
             
-            // ACTION_DOWN
-            val downEvent = obtainMethod.invoke(null, now, now, 0, x1.toFloat(), y1.toFloat(), 0)
-            injectEventMethod.invoke(uiAutomation, downEvent, true)
+            // ACTION_DOWN (参考应用：使用同步模式true)
+            val eventTime = uptimeMillisMethod.invoke(null) as Long
+            val downEvent = obtainMethod.invoke(null, downTime, eventTime, 0, x1.toFloat(), y1.toFloat(), 1)
+            val downSuccess = injectEventMethod.invoke(uiAutomation, downEvent, true) as Boolean
             recycleMethod.invoke(downEvent)
             
-            // ACTION_MOVE
+            if (!downSuccess) {
+                println("✗ ACTION_DOWN 失败")
+                return false
+            }
+            
+            // ACTION_MOVE (参考应用：循环中sleep 5ms，使用同步模式)
+            var allMoveSuccess = true
             for (i in 1 until steps) {
                 val progress = i.toFloat() / steps
                 val x = x1 + ((x2 - x1) * progress).toInt()
                 val y = y1 + ((y2 - y1) * progress).toInt()
-                val time = now + (duration * progress).toLong()
+                val moveEventTime = uptimeMillisMethod.invoke(null) as Long
                 
-                val moveEvent = obtainMethod.invoke(null, now, time, 2, x.toFloat(), y.toFloat(), 0)
-                injectEventMethod.invoke(uiAutomation, moveEvent, true)
+                val moveEvent = obtainMethod.invoke(null, downTime, moveEventTime, 2, x.toFloat(), y.toFloat(), 1)
+                val moveSuccess = injectEventMethod.invoke(uiAutomation, moveEvent, true) as Boolean
                 recycleMethod.invoke(moveEvent)
                 
-                Thread.sleep(10)
+                if (!moveSuccess) {
+                    allMoveSuccess = false
+                    break
+                }
+                
+                // 参考应用：sleep 5ms
+                Thread.sleep(5)
             }
             
-            // ACTION_UP
-            val upEvent = obtainMethod.invoke(null, now, now + duration, 1, x2.toFloat(), y2.toFloat(), 0)
-            val success = injectEventMethod.invoke(uiAutomation, upEvent, true) as Boolean
+            // ACTION_UP (参考应用：使用同步模式true)
+            val upEventTime = uptimeMillisMethod.invoke(null) as Long
+            val upEvent = obtainMethod.invoke(null, downTime, upEventTime, 1, x2.toFloat(), y2.toFloat(), 1)
+            val upSuccess = injectEventMethod.invoke(uiAutomation, upEvent, true) as Boolean
             recycleMethod.invoke(upEvent)
+            
+            val success = downSuccess && allMoveSuccess && upSuccess
             
             if (success) {
                 println("✓ 滑动成功")
             } else {
-                println("✗ 滑动失败")
+                println("✗ 滑动失败 (down=$downSuccess, move=$allMoveSuccess, up=$upSuccess)")
             }
             success
         } catch (e: Exception) {
@@ -1062,17 +1212,13 @@ class UiAutomationService private constructor() {
                 Boolean::class.javaPrimitiveType
             )
             
-            val downSuccess = injectEventMethod.invoke(uiAutomation, downEvent, true) as Boolean
-            Thread.sleep(10)
-            val upSuccess = injectEventMethod.invoke(uiAutomation, upEvent, true) as Boolean
+            // 异步模式：直接注入事件，不依赖返回值
+            injectEventMethod.invoke(uiAutomation, downEvent, false)
+            // 注意：不使用Thread.sleep，因为在某些线程环境下可能导致死锁
+            injectEventMethod.invoke(uiAutomation, upEvent, false)
             
-            val success = downSuccess && upSuccess
-            if (success) {
-                println("✓ 按键成功")
-            } else {
-                println("✗ 按键失败")
-            }
-            success
+            println("✓ 按键已注入: keyCode=$keyCode")
+            true
         } catch (e: Exception) {
             println("✗ 按键失败: ${e.message}")
             e.printStackTrace()
@@ -1120,11 +1266,12 @@ class UiAutomationService private constructor() {
                 Boolean::class.javaPrimitiveType
             )
             
-            val downSuccess = injectEventMethod.invoke(uiAutomation, downEvent, true) as Boolean
+            // 异步模式：直接注入事件，不依赖返回值
+            injectEventMethod.invoke(uiAutomation, downEvent, false)
             Thread.sleep(10)
-            val upSuccess = injectEventMethod.invoke(uiAutomation, upEvent, true) as Boolean
+            injectEventMethod.invoke(uiAutomation, upEvent, false)
             
-            downSuccess && upSuccess
+            true
         } catch (e: Exception) {
             println("✗ 按键失败: ${e.message}")
             e.printStackTrace()
@@ -1181,7 +1328,7 @@ class UiAutomationService private constructor() {
                 Boolean::class.javaPrimitiveType
             )
             
-            val success = injectEventMethod.invoke(uiAutomation, event, true) as Boolean
+            val success = injectEventMethod.invoke(uiAutomation, event, false) as Boolean
             
             // 回收事件
             val recycleMethod = motionEventClass.getMethod("recycle")
@@ -1204,6 +1351,198 @@ class UiAutomationService private constructor() {
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&apos;")
+    }
+    
+    /**
+     * 设置文本（使用UiAutomation的setText方法）
+     * @param text 要输入的文本
+     * @return 是否成功
+     */
+    fun setText(text: String): Boolean {
+        if (!initialized || uiAutomation == null) {
+            println("✗ setText: UiAutomation not initialized")
+            return false
+        }
+        
+        return try {
+            println("✓ setText: 开始设置文本: $text")
+            
+            // 获取根节点
+            val rootNode = getRootNodeWithCache()
+            if (rootNode == null) {
+                println("✗ setText: 无法获取根节点")
+                return false
+            }
+            println("✓ setText: 根节点已获取")
+            
+            // 先统计所有EditText节点（用于调试）
+            val allEditTexts = findAllEditTexts(rootNode)
+            println("✓ setText: 找到 ${allEditTexts.size} 个EditText节点")
+            
+            // 查找当前焦点的EditText节点
+            val focusedNode = findFocusedEditText(rootNode)
+            if (focusedNode == null) {
+                println("✗ setText: 未找到焦点的EditText节点")
+                if (allEditTexts.isNotEmpty()) {
+                    println("⚠ setText: 尝试使用第一个EditText节点")
+                    // 尝试使用第一个EditText
+                    val firstEditText = allEditTexts[0]
+                    // 先点击获取焦点
+                    val performClickMethod = Class.forName("android.view.accessibility.AccessibilityNodeInfo")
+                        .getMethod("performAction", Int::class.javaPrimitiveType)
+                    performClickMethod.invoke(firstEditText, 16) // ACTION_CLICK
+                    Thread.sleep(300)
+                    // 使用第一个EditText
+                    val result = performSetText(firstEditText, text)
+                    recycleMethod?.invoke(firstEditText)
+                    return result
+                }
+                return false
+            }
+            println("✓ setText: 找到焦点EditText节点")
+            
+            // 执行setText
+            val result = performSetText(focusedNode, text)
+            
+            // 回收节点
+            recycleMethod?.invoke(focusedNode)
+            
+            result
+        } catch (e: Exception) {
+            println("✗ setText失败: ${e.message}")
+            e.printStackTrace()
+            false
+        }
+    }
+    
+    /**
+     * 执行setText操作
+     */
+    private fun performSetText(node: Any?, text: String): Boolean {
+        return try {
+            
+            // 使用performAction(ACTION_SET_TEXT)设置文本
+            // ACTION_SET_TEXT = 2097152 (API 21+)
+            val actionSetText = 2097152
+            val bundleClass = Class.forName("android.os.Bundle")
+            val bundleConstructor = bundleClass.getDeclaredConstructor()
+            bundleConstructor.isAccessible = true
+            val bundle = bundleConstructor.newInstance()
+            
+            // 设置文本参数
+            val putCharSequenceMethod = bundleClass.getMethod(
+                "putCharSequence",
+                String::class.java,
+                CharSequence::class.java
+            )
+            putCharSequenceMethod.invoke(bundle, "ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE", text)
+            println("✓ setText: Bundle参数已设置")
+            
+            // 执行ACTION_SET_TEXT
+            val performActionMethod = Class.forName("android.view.accessibility.AccessibilityNodeInfo")
+                .getMethod(
+                    "performAction",
+                    Int::class.javaPrimitiveType,
+                    bundleClass
+                )
+            val result = performActionMethod.invoke(node, actionSetText, bundle) as Boolean
+            println("✓ performSetText: performAction返回: $result")
+            
+            result
+        } catch (e: Exception) {
+            println("✗ performSetText失败: ${e.message}")
+            e.printStackTrace()
+            false
+        }
+    }
+    
+    /**
+     * 查找所有EditText节点（用于调试）
+     */
+    private fun findAllEditTexts(node: Any?): MutableList<Any> {
+        val result = mutableListOf<Any>()
+        if (node == null) {
+            return result
+        }
+        
+        try {
+            val className = getClassNameMethod?.invoke(node) as? String
+            if (className != null && className.contains("EditText")) {
+                result.add(node)
+            }
+            
+            val childCount = getChildCountMethod?.invoke(node) as? Int ?: 0
+            for (i in 0 until childCount) {
+                val child = getChildMethod?.invoke(node, i)
+                result.addAll(findAllEditTexts(child))
+            }
+        } catch (e: Exception) {
+            // 忽略异常
+        }
+        
+        return result
+    }
+    
+    /**
+     * 递归查找当前焦点的EditText节点
+     */
+    private fun findFocusedEditText(node: Any?): Any? {
+        if (node == null) {
+            return null
+        }
+        
+        return try {
+            // 检查是否是EditText且获得焦点
+            val className = getClassNameMethod?.invoke(node) as? String
+            val isFocused = isFocusedMethod?.invoke(node) as? Boolean ?: false
+            val isEditable = isEnabledMethod?.invoke(node) as? Boolean ?: false
+            val isVisible = isVisibleToUserMethod?.invoke(node) as? Boolean ?: false
+            
+            if (className != null && className.contains("EditText")) {
+                println("  [调试] 找到EditText: $className, 焦点=$isFocused, 可编辑=$isEditable, 可见=$isVisible")
+                
+                if (isFocused) {
+                    println("✓ findFocusedEditText: 找到焦点EditText: $className")
+                    return node
+                } else if (isEditable && isVisible) {
+                    // 如果没有焦点，但可编辑且可见，也尝试使用（可能需要先点击）
+                    println("⚠ findFocusedEditText: 找到可编辑EditText（无焦点）: $className，尝试点击获取焦点")
+                    // 先尝试点击以获取焦点
+                    val performClickMethod = Class.forName("android.view.accessibility.AccessibilityNodeInfo")
+                        .getMethod("performAction", Int::class.javaPrimitiveType)
+                    val actionClick = 16 // ACTION_CLICK
+                    val clickResult = performClickMethod.invoke(node, actionClick) as Boolean
+                    println("  [调试] 点击结果: $clickResult")
+                    Thread.sleep(300) // 等待焦点切换
+                    // 再次检查是否获得焦点
+                    val nowFocused = isFocusedMethod?.invoke(node) as? Boolean ?: false
+                    if (nowFocused) {
+                        println("✓ findFocusedEditText: EditText已获得焦点")
+                        return node
+                    } else {
+                        println("⚠ findFocusedEditText: 点击后仍未获得焦点，但继续尝试使用")
+                        // 即使没有焦点，也尝试使用（某些情况下可能仍然有效）
+                        return node
+                    }
+                }
+            }
+            
+            // 递归查找子节点
+            val childCount = getChildCountMethod?.invoke(node) as? Int ?: 0
+            for (i in 0 until childCount) {
+                val child = getChildMethod?.invoke(node, i)
+                val result = findFocusedEditText(child)
+                if (result != null) {
+                    return result
+                }
+            }
+            
+            null
+        } catch (e: Exception) {
+            println("✗ findFocusedEditText异常: ${e.message}")
+            e.printStackTrace()
+            null
+        }
     }
 }
 
