@@ -1081,6 +1081,120 @@ class UiAutomationService private constructor() {
     }
 
     /**
+     * 执行按键操作（支持Meta键）
+     * @param keyCode 按键码
+     * @param metaState Meta键状态（如 META_CTRL_ON）
+     * @return 是否成功
+     */
+    fun pressKey(keyCode: Int, metaState: Int): Boolean {
+        if (!initialized || uiAutomation == null) {
+            println("✗ UiAutomation 未初始化，无法按键")
+            return false
+        }
+
+        return try {
+            println("执行按键: keyCode=$keyCode, metaState=$metaState")
+            
+            val now = System.currentTimeMillis()
+            
+            // 创建 KeyEvent
+            val keyEventClass = Class.forName("android.view.KeyEvent")
+            val constructor = keyEventClass.getConstructor(
+                Long::class.javaPrimitiveType,  // downTime
+                Long::class.javaPrimitiveType,  // eventTime
+                Int::class.javaPrimitiveType,   // action
+                Int::class.javaPrimitiveType,   // code
+                Int::class.javaPrimitiveType,   // repeat
+                Int::class.javaPrimitiveType    // metaState
+            )
+            
+            // ACTION_DOWN = 0, ACTION_UP = 1
+            val downEvent = constructor.newInstance(now, now, 0, keyCode, 0, metaState)
+            val upEvent = constructor.newInstance(now, now + 50, 1, keyCode, 0, metaState)
+            
+            // 注入事件
+            val uiAutomationClass = Class.forName("android.app.UiAutomation")
+            val injectEventMethod = uiAutomationClass.getMethod(
+                "injectInputEvent",
+                Class.forName("android.view.InputEvent"),
+                Boolean::class.javaPrimitiveType
+            )
+            
+            val downSuccess = injectEventMethod.invoke(uiAutomation, downEvent, true) as Boolean
+            Thread.sleep(10)
+            val upSuccess = injectEventMethod.invoke(uiAutomation, upEvent, true) as Boolean
+            
+            downSuccess && upSuccess
+        } catch (e: Exception) {
+            println("✗ 按键失败: ${e.message}")
+            e.printStackTrace()
+            false
+        }
+    }
+
+    /**
+     * 注入触摸事件（用于手势）
+     * @param action 动作类型（ACTION_DOWN, ACTION_MOVE, ACTION_UP）
+     * @param downTime 按下时间
+     * @param eventTime 事件时间
+     * @param x X坐标
+     * @param y Y坐标
+     * @return 是否成功
+     */
+    fun injectMotionEvent(action: Int, downTime: Long, eventTime: Long, x: Float, y: Float): Boolean {
+        if (!initialized || uiAutomation == null) {
+            return false
+        }
+
+        return try {
+            // 创建 MotionEvent
+            val motionEventClass = Class.forName("android.view.MotionEvent")
+            val obtainMethod = motionEventClass.getMethod(
+                "obtain",
+                Long::class.javaPrimitiveType,
+                Long::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType
+            )
+            
+            val event = obtainMethod.invoke(
+                null,
+                downTime,
+                eventTime,
+                action,
+                x,
+                y,
+                0  // metaState
+            )
+            
+            // 设置 Source 为触摸屏
+            val setSourceMethod = motionEventClass.getMethod("setSource", Int::class.javaPrimitiveType)
+            setSourceMethod.invoke(event, 0x00001002) // SOURCE_TOUCHSCREEN
+            
+            // 注入事件
+            val uiAutomationClass = Class.forName("android.app.UiAutomation")
+            val injectEventMethod = uiAutomationClass.getMethod(
+                "injectInputEvent",
+                Class.forName("android.view.InputEvent"),
+                Boolean::class.javaPrimitiveType
+            )
+            
+            val success = injectEventMethod.invoke(uiAutomation, event, true) as Boolean
+            
+            // 回收事件
+            val recycleMethod = motionEventClass.getMethod("recycle")
+            recycleMethod.invoke(event)
+            
+            success
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    /**
      * 转义 XML 特殊字符
      */
     private fun escapeXml(str: String): String {
