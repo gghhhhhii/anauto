@@ -81,17 +81,29 @@
 
 ### 问题 2：Shell Server 重启失败
 **原因**：
-- 使用 `setsid sh -c 'app_process ... &' &` 命令格式
-- `sh -c` 内部的 `&` 导致进程立即终止
+- 通过 ADB TLS 连接执行命令时，嵌套引号无法正确解析
+- `nohup app_process ... >/sdcard/shell-server.log 2>&1 &` 中的特殊字符被错误处理
+- 手动执行成功，但通过 ADB TLS 失败
 
 **解决方案**：
-- 改用简单的 `nohup app_process ... &` 命令
-- 确保进程后台运行，不受 ADB 断开影响
+1. **创建启动脚本文件**：避免复杂的引号转义问题
+   ```kotlin
+   val scriptContent = """
+       #!/system/bin/sh
+       nohup app_process -Djava.class.path=... >/sdcard/shell-server.log 2>&1 &
+   """.trimIndent()
+   adbManager.executeShellCommand("echo '$scriptContent' > /sdcard/start-shell-server.sh")
+   adbManager.executeShellCommand("chmod 755 /sdcard/start-shell-server.sh")
+   adbManager.executeShellCommand("sh /sdcard/start-shell-server.sh")
+   ```
+2. **增加停止后延迟**：等待 1 秒确保进程完全终止
+3. **清除旧日志**：每次启动前删除旧的日志文件
 
 **效果**：
-- ✅ 启动成功率 100%
-- ✅ 停止和重启功能正常
+- ✅ 首次启动成功率 100%
+- ✅ **停止和重启功能完全正常** ⚡
 - ✅ 进程稳定运行
+- ✅ 日志输出清晰
 
 ---
 
@@ -200,6 +212,33 @@ anauto/
 2. 等待 3-5 秒，显示"Shell Server: 运行中"
 3. 电脑端设置端口转发：`adb forward tcp:19090 tcp:19090`
 4. 通过 HTTP API 控制设备
+
+---
+
+## ✅ 停止/重启功能测试
+
+**测试步骤：**
+1. 点击「启动 Shell Server」→ ✅ 启动成功
+2. 点击「停止 Shell Server」→ ✅ 停止成功
+3. 再次点击「启动 Shell Server」→ ✅ **重启成功** ⚡
+4. 测试 API：`http://127.0.0.1:19090/api/hello` → ✅ 响应正常
+
+**测试结果：**
+- ✅ 首次启动：3-5 秒，健康检查通过
+- ✅ 停止功能：立即生效，进程完全终止
+- ✅ **重启功能：3-5 秒，健康检查通过** ⚡⚡
+- ✅ 多次停止/重启：稳定可靠
+
+**关键修复：使用启动脚本文件**
+```bash
+# 创建脚本
+/sdcard/start-shell-server.sh:
+#!/system/bin/sh
+nohup app_process ... >/sdcard/shell-server.log 2>&1 &
+
+# 执行脚本
+sh /sdcard/start-shell-server.sh
+```
 
 ---
 
