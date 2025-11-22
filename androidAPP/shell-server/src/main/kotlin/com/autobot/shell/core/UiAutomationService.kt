@@ -25,6 +25,10 @@ class UiAutomationService private constructor() {
 
     private var uiAutomation: Any? = null
     private var initialized = false
+    
+    // 缓存的根节点（参考应用的优化）
+    @Volatile
+    private var cachedRootNode: Any? = null
 
     // 反射获取的方法
     private var getRootInActiveWindowMethod: Method? = null
@@ -41,6 +45,16 @@ class UiAutomationService private constructor() {
     private var getPackageNameMethod: Method? = null
     private var getBoundsInScreenMethod: Method? = null
     private var recycleMethod: Method? = null
+    
+    // 补充的反射方法
+    private var isCheckableMethod: Method? = null
+    private var isCheckedMethod: Method? = null
+    private var isFocusableMethod: Method? = null
+    private var isFocusedMethod: Method? = null
+    private var isScrollableMethod: Method? = null
+    private var isLongClickableMethod: Method? = null
+    private var isPasswordMethod: Method? = null
+    private var isSelectedMethod: Method? = null
 
     /**
      * 初始化 UiAutomation
@@ -95,6 +109,9 @@ class UiAutomationService private constructor() {
 
             // 6. 缓存常用的反射方法
             cacheReflectionMethods()
+            
+            // 7. 注册事件监听器，实时更新根节点缓存（参考应用的优化）
+            registerAccessibilityEventListener()
 
             initialized = true
             println("✓ UiAutomation 初始化成功")
@@ -153,16 +170,107 @@ class UiAutomationService private constructor() {
             getPackageNameMethod = accessibilityNodeInfoClass.getMethod("getPackageName")
             getBoundsInScreenMethod = accessibilityNodeInfoClass.getMethod("getBoundsInScreen", rectClass)
             recycleMethod = accessibilityNodeInfoClass.getMethod("recycle")
+            
+            // 补充的方法
+            isCheckableMethod = accessibilityNodeInfoClass.getMethod("isCheckable")
+            isCheckedMethod = accessibilityNodeInfoClass.getMethod("isChecked")
+            isFocusableMethod = accessibilityNodeInfoClass.getMethod("isFocusable")
+            isFocusedMethod = accessibilityNodeInfoClass.getMethod("isFocused")
+            isScrollableMethod = accessibilityNodeInfoClass.getMethod("isScrollable")
+            isLongClickableMethod = accessibilityNodeInfoClass.getMethod("isLongClickable")
+            isPasswordMethod = accessibilityNodeInfoClass.getMethod("isPassword")
+            isSelectedMethod = accessibilityNodeInfoClass.getMethod("isSelected")
 
             println("✓ 反射方法已缓存")
         } catch (e: Exception) {
             println("⚠ 缓存反射方法失败: ${e.message}")
         }
     }
+    
+    /**
+     * 注册 AccessibilityEvent 监听器，实时更新根节点缓存
+     * 这是参考应用的核心优化：每次窗口变化时自动更新缓存
+     */
+    private fun registerAccessibilityEventListener() {
+        try {
+            val uiAutomationClass = Class.forName("android.app.UiAutomation")
+            val listenerClass = Class.forName("android.app.UiAutomation\$OnAccessibilityEventListener")
+            
+            // 创建监听器代理
+            val listener = Proxy.newProxyInstance(
+                listenerClass.classLoader,
+                arrayOf(listenerClass)
+            ) { _, method, args ->
+                if (method.name == "onAccessibilityEvent" && args != null && args.isNotEmpty()) {
+                    val event = args[0]
+                    val eventClass = Class.forName("android.view.accessibility.AccessibilityEvent")
+                    val getEventTypeMethod = eventClass.getMethod("getEventType")
+                    val eventType = getEventTypeMethod.invoke(event) as Int
+                    
+                    // TYPE_WINDOW_STATE_CHANGED (32) 或 TYPE_WINDOW_CONTENT_CHANGED (8)
+                    // 参考应用的事件类型
+                    if (eventType == 32 || eventType == 8 || eventType == 2048) {
+                        // 获取并缓存新的根节点
+                        try {
+                            val newRootNode = getRootInActiveWindowMethod?.invoke(uiAutomation)
+                            if (newRootNode != null) {
+                                // 回收旧的缓存节点
+                                cachedRootNode?.let { oldNode ->
+                                    try {
+                                        recycleMethod?.invoke(oldNode)
+                                    } catch (e: Exception) {
+                                        // 忽略回收错误
+                                    }
+                                }
+                                cachedRootNode = newRootNode
+                            }
+                        } catch (e: Exception) {
+                            // 忽略更新错误
+                        }
+                    }
+                }
+                null
+            }
+            
+            // 注册监听器
+            val setOnAccessibilityEventListenerMethod = uiAutomationClass.getMethod(
+                "setOnAccessibilityEventListener",
+                listenerClass
+            )
+            setOnAccessibilityEventListenerMethod.invoke(uiAutomation, listener)
+            
+            println("✓ AccessibilityEvent 监听器已注册（根节点自动缓存）")
+        } catch (e: Exception) {
+            println("⚠ 注册事件监听器失败: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+
+    /**
+     * 获取根节点（带缓存回退机制）
+     * 参考应用的实现：如果获取失败，使用缓存的根节点
+     */
+    private fun getRootNodeWithCache(): Any? {
+        return try {
+            // 首先尝试获取新的根节点
+            val rootNode = getRootInActiveWindowMethod?.invoke(uiAutomation)
+            if (rootNode != null) {
+                rootNode
+            } else {
+                // 获取失败，使用缓存的根节点
+                println("⚠ 获取根节点失败，使用缓存")
+                cachedRootNode
+            }
+        } catch (e: Exception) {
+            // 异常时也使用缓存
+            println("⚠ 获取根节点异常，使用缓存: ${e.message}")
+            cachedRootNode
+        }
+    }
 
     /**
      * 获取屏幕树 XML
-     * 优化版本：使用 AccessibilityNodeInfoDumper 快速生成
+     * 优化版本：参考原生 uiautomator dump 实现 + 根节点缓存
      */
     fun dumpXML(waitForIdle: Boolean, visibleOnly: Boolean): String {
         if (!initialized || uiAutomation == null) {
@@ -171,23 +279,23 @@ class UiAutomationService private constructor() {
         }
 
         return try {
-            // 等待 UI 稳定（可选）
+            // ⚡ 参考应用的优化：默认不等待 UI 空闲，使用缓存的根节点
             if (waitForIdle) {
                 waitForIdleMethod?.invoke(uiAutomation, 100L, 500L)
             }
 
-            // 获取根节点
-            val rootNode = getRootInActiveWindowMethod?.invoke(uiAutomation)
+            // 获取根节点（带缓存回退）
+            val rootNode = getRootNodeWithCache()
             if (rootNode == null) {
-                println("✗ 无法获取根节点")
+                println("✗ 无法获取根节点（缓存也为空）")
                 return ""
             }
 
-            // 快速生成 XML（非递归版本，性能优化）
-            val xml = buildXmlStringFast(rootNode, visibleOnly)
+            // 使用 XmlSerializer 快速生成 XML（参考 uiautomator 实现）
+            val xml = dumpNodeToXml(rootNode, visibleOnly)
 
-            // 回收节点
-            recycleMethod?.invoke(rootNode)
+            // ⚠️ 不回收根节点（如果是缓存的，不能回收）
+            // 参考应用也不回收根节点
 
             xml
         } catch (e: Exception) {
@@ -196,10 +304,92 @@ class UiAutomationService private constructor() {
             ""
         }
     }
+    
+    /**
+     * 使用 XmlSerializer 导出节点树（参考 uiautomator 实现）
+     */
+    private fun dumpNodeToXml(rootNode: Any?, visibleOnly: Boolean): String {
+        val writer = java.io.StringWriter()
+        val serializer = android.util.Xml.newSerializer()
+        
+        try {
+            serializer.setOutput(writer)
+            serializer.startDocument("UTF-8", true)
+            serializer.startTag("", "hierarchy")
+            
+            // 序列化节点树
+            serializeNode(rootNode, serializer, visibleOnly, 0)
+            
+            serializer.endTag("", "hierarchy")
+            serializer.endDocument()
+            serializer.flush()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        
+        return writer.toString()
+    }
+    
+    /**
+     * 递归序列化节点（参考 uiautomator 实现，立即释放子节点）
+     */
+    private fun serializeNode(node: Any?, serializer: org.xmlpull.v1.XmlSerializer, visibleOnly: Boolean, depth: Int) {
+        if (node == null || depth > 200) return
+        
+        // 检查可见性
+        val isVisible = isVisibleToUserMethod?.invoke(node) as? Boolean ?: false
+        if (visibleOnly && !isVisible) return
+        
+        try {
+            serializer.startTag("", "node")
+            
+            // 序列化属性
+            serializer.attribute("", "index", depth.toString())
+            serializer.attribute("", "text", getTextMethod?.invoke(node)?.toString() ?: "")
+            serializer.attribute("", "resource-id", getResourceIdMethod?.invoke(node)?.toString() ?: "")
+            serializer.attribute("", "class", getClassNameMethod?.invoke(node)?.toString() ?: "")
+            serializer.attribute("", "package", getPackageNameMethod?.invoke(node)?.toString() ?: "")
+            serializer.attribute("", "content-desc", getContentDescriptionMethod?.invoke(node)?.toString() ?: "")
+            serializer.attribute("", "checkable", (isCheckableMethod?.invoke(node) as? Boolean ?: false).toString())
+            serializer.attribute("", "checked", (isCheckedMethod?.invoke(node) as? Boolean ?: false).toString())
+            serializer.attribute("", "clickable", (isClickableMethod?.invoke(node) as? Boolean ?: false).toString())
+            serializer.attribute("", "enabled", (isEnabledMethod?.invoke(node) as? Boolean ?: false).toString())
+            serializer.attribute("", "focusable", (isFocusableMethod?.invoke(node) as? Boolean ?: false).toString())
+            serializer.attribute("", "focused", (isFocusedMethod?.invoke(node) as? Boolean ?: false).toString())
+            serializer.attribute("", "scrollable", (isScrollableMethod?.invoke(node) as? Boolean ?: false).toString())
+            serializer.attribute("", "long-clickable", (isLongClickableMethod?.invoke(node) as? Boolean ?: false).toString())
+            serializer.attribute("", "password", (isPasswordMethod?.invoke(node) as? Boolean ?: false).toString())
+            serializer.attribute("", "selected", (isSelectedMethod?.invoke(node) as? Boolean ?: false).toString())
+            
+            // Bounds
+            val bounds = getBoundsInScreenMethod?.invoke(node)
+            if (bounds != null) {
+                val rect = bounds as android.graphics.Rect
+                serializer.attribute("", "bounds", "[${rect.left},${rect.top}][${rect.right},${rect.bottom}]")
+            } else {
+                serializer.attribute("", "bounds", "[0,0][0,0]")
+            }
+            
+            // 递归处理子节点
+            val childCount = getChildCountMethod?.invoke(node) as? Int ?: 0
+            for (i in 0 until childCount) {
+                val child = getChildMethod?.invoke(node, i)
+                if (child != null) {
+                    serializeNode(child, serializer, visibleOnly, depth + 1)
+                    // ⚡ 立即释放子节点（关键优化！）
+                    recycleMethod?.invoke(child)
+                }
+            }
+            
+            serializer.endTag("", "node")
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
 
     /**
      * 获取屏幕树 JSON
-     * 优化版本：快速生成，减少反射调用
+     * 优化版本：参考原生 uiautomator dump 实现 + 根节点缓存
      */
     fun dumpJSON(waitForIdle: Boolean, visibleOnly: Boolean): String {
         if (!initialized || uiAutomation == null) {
@@ -208,23 +398,23 @@ class UiAutomationService private constructor() {
         }
 
         return try {
-            // 等待 UI 稳定（可选）
+            // ⚡ 参考应用的优化：默认不等待 UI 空闲，使用缓存的根节点
             if (waitForIdle) {
                 waitForIdleMethod?.invoke(uiAutomation, 100L, 500L)
             }
 
-            // 获取根节点
-            val rootNode = getRootInActiveWindowMethod?.invoke(uiAutomation)
+            // 获取根节点（带缓存回退）
+            val rootNode = getRootNodeWithCache()
             if (rootNode == null) {
-                println("✗ 无法获取根节点")
+                println("✗ 无法获取根节点（缓存也为空）")
                 return "{}"
             }
 
-            // 快速生成 JSON
-            val json = buildJsonObjectFast(rootNode, visibleOnly)
+            // 递归生成 JSON（立即释放子节点）
+            val json = nodeToJson(rootNode, visibleOnly, 0)
 
-            // 回收节点
-            recycleMethod?.invoke(rootNode)
+            // ⚠️ 不回收根节点（如果是缓存的，不能回收）
+            // 参考应用也不回收根节点
 
             json.toString()
         } catch (e: Exception) {
@@ -232,6 +422,69 @@ class UiAutomationService private constructor() {
             e.printStackTrace()
             "{}"
         }
+    }
+    
+    /**
+     * 递归将节点转换为 JSON（参考 uiautomator 实现，立即释放子节点）
+     */
+    private fun nodeToJson(node: Any?, visibleOnly: Boolean, depth: Int): JSONObject {
+        val json = JSONObject()
+        if (node == null || depth > 200) return json
+        
+        // 检查可见性
+        val isVisible = isVisibleToUserMethod?.invoke(node) as? Boolean ?: false
+        if (visibleOnly && !isVisible) return json
+        
+        try {
+            // 基本属性
+            json.put("text", getTextMethod?.invoke(node)?.toString() ?: "")
+            json.put("resourceId", getResourceIdMethod?.invoke(node)?.toString() ?: "")
+            json.put("className", getClassNameMethod?.invoke(node)?.toString() ?: "")
+            json.put("packageName", getPackageNameMethod?.invoke(node)?.toString() ?: "")
+            json.put("contentDesc", getContentDescriptionMethod?.invoke(node)?.toString() ?: "")
+            json.put("checkable", isCheckableMethod?.invoke(node) as? Boolean ?: false)
+            json.put("checked", isCheckedMethod?.invoke(node) as? Boolean ?: false)
+            json.put("clickable", isClickableMethod?.invoke(node) as? Boolean ?: false)
+            json.put("enabled", isEnabledMethod?.invoke(node) as? Boolean ?: false)
+            json.put("focusable", isFocusableMethod?.invoke(node) as? Boolean ?: false)
+            json.put("focused", isFocusedMethod?.invoke(node) as? Boolean ?: false)
+            json.put("scrollable", isScrollableMethod?.invoke(node) as? Boolean ?: false)
+            json.put("longClickable", isLongClickableMethod?.invoke(node) as? Boolean ?: false)
+            json.put("password", isPasswordMethod?.invoke(node) as? Boolean ?: false)
+            json.put("selected", isSelectedMethod?.invoke(node) as? Boolean ?: false)
+            json.put("visible", isVisible)
+            
+            // Bounds
+            val bounds = getBoundsInScreenMethod?.invoke(node)
+            if (bounds != null) {
+                val rect = bounds as android.graphics.Rect
+                val boundsJson = JSONObject()
+                boundsJson.put("left", rect.left)
+                boundsJson.put("top", rect.top)
+                boundsJson.put("right", rect.right)
+                boundsJson.put("bottom", rect.bottom)
+                json.put("bounds", boundsJson)
+            }
+            
+            // 处理子节点
+            val childCount = getChildCountMethod?.invoke(node) as? Int ?: 0
+            if (childCount > 0) {
+                val children = JSONArray()
+                for (i in 0 until childCount) {
+                    val child = getChildMethod?.invoke(node, i)
+                    if (child != null) {
+                        children.put(nodeToJson(child, visibleOnly, depth + 1))
+                        // ⚡ 立即释放子节点（关键优化！）
+                        recycleMethod?.invoke(child)
+                    }
+                }
+                json.put("children", children)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        
+        return json
     }
 
     /**

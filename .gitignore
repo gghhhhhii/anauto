@@ -46,7 +46,12 @@ Desktop.ini
 autobot_3.2.1.apk
 autobot_extracted/
 autobot_decompiled/
+autobot_server_decompiled/
 参考应用*/
+
+# jadx tool (too large for GitHub)
+jadx/
+apk_decompiled/
 
 # Test and diagnostic scripts
 test_*.ps1

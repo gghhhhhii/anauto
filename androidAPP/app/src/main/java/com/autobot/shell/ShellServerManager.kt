@@ -148,16 +148,16 @@ class ShellServerManager(private val context: Context) {
             // 日志文件路径（外部存储，方便查看）
             val logPath = "/sdcard/shell-server.log"
             
-            // 启动命令（使用 setsid 完全守护化）
-            // 1. setsid: 创建新会话，进程成为会话首进程，脱离控制终端
-            // 2. sh -c '...': 在子 shell 中执行，确保后台运行不受父进程影响
-            // 3. </dev/null: 重定向 stdin
-            // 4. >$logPath 2>&1: 重定向 stdout 和 stderr 到日志文件
-            // 5. & 结尾: 后台运行
-            // 6. 外层 &: 确保整个 setsid 命令也是后台
-            val command = "setsid sh -c 'app_process -Djava.class.path=${jarFile.absolutePath} " +
+            // 启动命令（使用 nohup 后台运行）
+            // 1. nohup: 忽略 HUP 信号，进程不会随父进程退出而终止
+            // 2. app_process: Android 进程启动器
+            // 3. -Djava.class.path: 指定 JAR 文件路径
+            // 4. >/dev/null: 重定向 stdin（避免等待输入）
+            // 5. >$logPath 2>&1: 重定向 stdout 和 stderr 到日志文件
+            // 6. & 结尾: 后台运行
+            val command = "nohup app_process -Djava.class.path=${jarFile.absolutePath} " +
                     "${jarFile.parent} com.autobot.shell.ShellServerKt $SHELL_SERVER_PORT " +
-                    "</dev/null >$logPath 2>&1 &' &"
+                    ">/sdcard/shell-server.log 2>&1 &"
 
             Timber.i("启动命令: $command")
             Timber.i("💡 日志文件: $logPath")
