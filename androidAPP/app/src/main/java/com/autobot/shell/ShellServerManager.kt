@@ -144,22 +144,34 @@ class ShellServerManager(private val context: Context) {
             
             // 先尝试停止已有的 Shell Server
             stopShellServerViaAdb(adbManager)
+            
+            // 等待进程完全终止
+            Timber.d("等待 Shell Server 进程完全终止...")
+            delay(1000)
 
             // 日志文件路径（外部存储，方便查看）
             val logPath = "/sdcard/shell-server.log"
+            val scriptPath = "/sdcard/start-shell-server.sh"
             
-            // 启动命令（使用 nohup 后台运行）
-            // 1. nohup: 忽略 HUP 信号，进程不会随父进程退出而终止
-            // 2. app_process: Android 进程启动器
-            // 3. -Djava.class.path: 指定 JAR 文件路径
-            // 4. >/dev/null: 重定向 stdin（避免等待输入）
-            // 5. >$logPath 2>&1: 重定向 stdout 和 stderr 到日志文件
-            // 6. & 结尾: 后台运行
-            val command = "nohup app_process -Djava.class.path=${jarFile.absolutePath} " +
-                    "${jarFile.parent} com.autobot.shell.ShellServerKt $SHELL_SERVER_PORT " +
-                    ">/sdcard/shell-server.log 2>&1 &"
-
-            Timber.i("启动命令: $command")
+            // 清除旧日志
+            adbManager.executeShellCommand("rm -f $logPath")
+            Timber.d("已清除旧日志文件")
+            
+            // 方案：创建启动脚本，避免复杂的引号转义问题
+            val scriptContent = """
+                #!/system/bin/sh
+                nohup app_process -Djava.class.path=${jarFile.absolutePath} ${jarFile.parent} com.autobot.shell.ShellServerKt $SHELL_SERVER_PORT >/sdcard/shell-server.log 2>&1 &
+            """.trimIndent()
+            
+            // 写入启动脚本
+            Timber.d("创建启动脚本: $scriptPath")
+            adbManager.executeShellCommand("echo '$scriptContent' > $scriptPath")
+            adbManager.executeShellCommand("chmod 755 $scriptPath")
+            Timber.d("✓ 启动脚本已创建并赋权")
+            
+            // 执行启动脚本
+            val command = "sh $scriptPath"
+            Timber.i("执行启动脚本: $command")
             Timber.i("💡 日志文件: $logPath")
             
             // 通过 ADB 执行命令
